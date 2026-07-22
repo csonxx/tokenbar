@@ -134,16 +134,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.view.translatesAutoresizingMaskIntoConstraints = false
         self.hosting = host
 
+        let initialSize = NSSize(width: 880, height: 720)
+
         if let existing = dashboardWindow {
-            Self.log("reusing existing window \(existing.title ?? "?")")
+            Self.log("reusing existing window \(existing.title)")
+            // Assigning a brand-new `contentViewController` on an existing
+            // window can make AppKit resize it to that controller's initial
+            // fitting size before SwiftUI's own layout has settled - which is
+            // how this collapsed to just its title bar on a second open, even
+            // with the size safeguard already in place for the first-open
+            // path below. Re-check and correct it here too.
             existing.contentViewController = host
+            if existing.frame.width < existing.contentMinSize.width || existing.frame.height < existing.contentMinSize.height {
+                existing.setContentSize(initialSize)
+                existing.center()
+            }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        let initialSize = NSSize(width: 880, height: 720)
         let frame = NSRect(origin: .zero, size: initialSize)
         let window = NSWindow(
             contentRect: frame,
