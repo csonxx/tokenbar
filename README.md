@@ -4,12 +4,17 @@
 
 ## 截图
 
-> 这台构建/开发用的环境是无头（headless）沙盒，没有真实可交互的桌面会话，没法截到真实运行画面。等你在自己机器上跑起来之后，把菜单栏下拉和完整面板的截图存到 `docs/screenshot-menu.png`、`docs/screenshot-dashboard.png`，再把下面两行取消注释即可。
+菜单栏只显示一个数字（默认计费 token）：
 
-<!-- ![菜单栏下拉](docs/screenshot-menu.png) -->
-<!-- ![完整面板](docs/screenshot-dashboard.png) -->
+![菜单栏](docs/screenshot-menubar.png)
 
-菜单栏下拉大概长这样：顶部一排时间窗口（今天 / 24h / 3D / 7D / 15D / 30D / 全部）胶囊，下面是工具卡片网格，每张卡片是图标 + 名称 + 迷你走势条 + 计费 token（大字）+ 命中率 / 总量（小字）。完整面板是同一套视觉语言的放大版，外加按模型拆分、可独立筛选时间和指标（计费 / 总量 / turns）的消耗趋势图。
+点一下弹出下拉菜单——顶部一排时间窗口胶囊，下面是工具卡片网格：
+
+![菜单栏下拉](docs/screenshot-menu.png)
+
+完整面板是同一套视觉语言的放大版，外加按模型拆分、可独立筛选时间和指标（计费 / 总量 / turns）的消耗趋势图：
+
+![完整面板](docs/screenshot-dashboard.png)
 
 ## 功能
 
