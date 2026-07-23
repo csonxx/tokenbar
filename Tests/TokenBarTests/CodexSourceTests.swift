@@ -277,6 +277,48 @@ final class CodexSourceTests: XCTestCase {
         XCTAssertEqual(r.samples[1].inputTokens, 100)
         XCTAssertEqual(r.samples[1].outputTokens, 50)
     }
+
+    /// A forked session replays the entire parent conversation's token_count
+    /// history into the new rollout at fork time - a dense sub-second burst -
+    /// before any live activity. That history was already counted under the
+    /// parent, so it must be suppressed (baseline-only), and only genuinely
+    /// new activity after the replay burst should emit samples. Regression
+    /// for a ~3B-token spike dumped into a single minute.
+    func testForkedSessionReplayIsNotDoubleCounted() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tokenbar-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let progress = SourceProgress(storeURL: tmp.appendingPathComponent("progress.json"))
+        let home = tmp.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".codex/archived_sessions"), withIntermediateDirectories: true)
+        let rollout = home.appendingPathComponent(".codex/archived_sessions/rollout-fork.jsonl")
+
+        // Forked session_meta. Replay burst: 4 token_count events all stamped
+        // within the same second (sub-second gaps), cumulative climbing to a
+        // large value - this is the already-counted parent history.
+        let meta = #"{"timestamp":"2026-07-20T08:00:00.000Z","type":"session_meta","payload":{"model_provider":"openai","forked_from_id":"parent-abc"}}"#
+        let replay1 = #"{"timestamp":"2026-07-20T08:00:00.010Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"cached_input_tokens":90000,"cache_write_input_tokens":0,"output_tokens":1000,"reasoning_output_tokens":0,"total_tokens":101000}}}}"#
+        let replay2 = #"{"timestamp":"2026-07-20T08:00:00.020Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500000,"cached_input_tokens":480000,"cache_write_input_tokens":0,"output_tokens":3000,"reasoning_output_tokens":0,"total_tokens":503000}}}}"#
+        let replay3 = #"{"timestamp":"2026-07-20T08:00:00.030Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000000,"cached_input_tokens":1950000,"cache_write_input_tokens":0,"output_tokens":8000,"reasoning_output_tokens":0,"total_tokens":2008000}}}}"#
+        let replay4 = #"{"timestamp":"2026-07-20T08:00:00.040Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000000,"cached_input_tokens":4900000,"cache_write_input_tokens":0,"output_tokens":20000,"reasoning_output_tokens":0,"total_tokens":5020000}}}}"#
+        // First live event: arrives well after the burst (a >2s gap), and its
+        // delta over the last replayed cumulative is the only real new usage.
+        let live = #"{"timestamp":"2026-07-20T08:00:15.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5010000,"cached_input_tokens":4905000,"cache_write_input_tokens":0,"output_tokens":20500,"reasoning_output_tokens":0,"total_tokens":5030500}}}}"#
+        let contents = [meta, replay1, replay2, replay3, replay4, live].map { $0 + "\n" }.joined()
+        try contents.write(to: rollout, atomically: true, encoding: .utf8)
+
+        let src = CodexSource(home: home, progress: progress)
+        let r = try await src.collect()
+        // Only the single live event's net-new delta should emit; none of the
+        // multi-million-token replay history.
+        XCTAssertEqual(r.samples.count, 1, "forked replay history must not be counted")
+        let s = r.samples[0]
+        // delta from replay4 (5,000,000 / 4,900,000 / 20,000) to live
+        // (5,010,000 / 4,905,000 / 20,500): input grew 10000 with cached +5000
+        // -> uncached 5000; cacheRead 5000; output 500.
+        XCTAssertEqual(s.inputTokens, 5000)
+        XCTAssertEqual(s.cacheReadTokens, 5000)
+        XCTAssertEqual(s.outputTokens, 500)
+    }
 }
 
 final class AggregatorTests: XCTestCase {

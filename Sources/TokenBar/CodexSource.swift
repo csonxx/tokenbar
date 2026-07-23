@@ -50,8 +50,24 @@ final class CodexSource: TokenSource {
         let payload: SessionMetaPayload?
         struct SessionMetaPayload: Decodable {
             let model_provider: String?
+            /// Present when this rollout was forked from another session.
+            /// Codex replays the *entire* parent history's token_count events
+            /// into the new file at fork time (all stamped at the fork
+            /// instant, in a dense sub-second burst), then continues live.
+            /// That replayed prefix was already counted under the parent's
+            /// own rollout, so counting it again here double-counts a whole
+            /// session (observed as a multi-billion-token spike dumped into
+            /// the single minute the fork happened).
+            let forked_from_id: String?
         }
     }
+
+    /// A gap larger than this between consecutive `token_count` events marks
+    /// the end of a fork's replayed history burst: the replay is a mechanical
+    /// dump with sub-second spacing, while real generation checkpoints are
+    /// seconds apart (5-15s in practice, never sub-second). Comfortably above
+    /// the former, below the latter.
+    private static let forkReplayGapThreshold: TimeInterval = 2.0
 
     private struct TurnContext: Decodable {
         let type: String?
@@ -143,6 +159,13 @@ final class CodexSource: TokenSource {
                 var startOffset: UInt64 = 0
                 var lastTotal: CodexLine.Payload.TokenInfo.Usage? = nil
                 var modelGuess = "codex"
+                // Fork-replay suppression state. Only meaningful on a file's
+                // first scan (offset 0), where the replayed parent history
+                // sits as a dense burst right after `session_meta`; on a
+                // resumed scan (offset > 0) that burst is already behind us,
+                // so we never re-enter replay mode.
+                var replayActive = false
+                var lastTokenCountTs: Date? = nil
                 if let prior, prior.identity == identity, prior.offset <= fileSize {
                     startOffset = prior.offset
                     if let raw = prior.metadata {
@@ -205,10 +228,17 @@ final class CodexSource: TokenSource {
                     guard let outerType = Self.outerType(of: line) else { return }
                     switch outerType {
                     case "session_meta":
-                        if modelGuess == "codex",
-                           let meta = try? JSONDecoder().decode(SessionMeta.self, from: Data(line.utf8)),
-                           let provider = meta.payload?.model_provider, !provider.isEmpty {
-                            modelGuess = provider
+                        if let meta = try? JSONDecoder().decode(SessionMeta.self, from: Data(line.utf8)) {
+                            if modelGuess == "codex", let provider = meta.payload?.model_provider, !provider.isEmpty {
+                                modelGuess = provider
+                            }
+                            // A forked session's replayed parent history is
+                            // only present at the very start of the file, so
+                            // only arm replay suppression on the first scan.
+                            if startOffset == 0,
+                               let forked = meta.payload?.forked_from_id, !forked.isEmpty {
+                                replayActive = true
+                            }
                         }
                     case "turn_context":
                         // A new turn is starting, so whatever was accumulated
@@ -232,12 +262,28 @@ final class CodexSource: TokenSource {
                         guard let info = rec.payload?.info else { return }
                         guard let current = referenceUsage(info) else { return }
                         let ts = parseTimestamp(rec.timestamp) ?? Date()
+                        // The replayed history burst is a run of token_count
+                        // events packed sub-second; the first real (live)
+                        // event after it arrives seconds later. Once that gap
+                        // appears, the replay is over and we start counting.
+                        if replayActive, let last = lastTokenCountTs,
+                           ts.timeIntervalSince(last) > Self.forkReplayGapThreshold {
+                            replayActive = false
+                        }
+                        lastTokenCountTs = ts
                         let inc = incremental(current: current, last: lastTotal)
                         // Keep tracking the counter Codex itself reports so
                         // later, real turns in this file still get correct
                         // deltas - we just don't want to *count* an
-                        // implausible one.
+                        // implausible one. This must happen even while
+                        // suppressing replay, so the first live delta is
+                        // measured against the parent's final cumulative
+                        // (i.e. counts only genuinely new fork activity).
                         lastTotal = current
+                        // Replayed parent history: already counted under the
+                        // parent rollout, so advance the baseline (done above)
+                        // but never emit or coalesce it.
+                        if replayActive { return }
                         // Skip pure-zero deltas to keep the timeline honest.
                         if inc.totalTokens <= 0 && inc.inputTokens <= 0 && inc.outputTokens <= 0 { return }
                         // Guard against corrupted upstream data: real Codex

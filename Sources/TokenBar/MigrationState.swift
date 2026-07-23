@@ -30,7 +30,13 @@ struct MigrationState: Codable, Equatable {
     /// Previously each checkpoint became its own sample, inflating
     /// 调用次数/messageCount by roughly an order of magnitude and
     /// fragmenting a single turn's tokens across a dozen-plus rows.
-    static let current = 5
+    ///
+    /// v6: suppresses the replayed parent history in forked Codex sessions.
+    /// A fork re-emits the entire parent conversation's token_count history
+    /// into the new rollout at fork time (a dense sub-second burst), which
+    /// double-counted a whole already-counted session - observed in the wild
+    /// as a ~3B-token spike dumped into the single minute a fork happened.
+    static let current = 6
 
     static func load(storeURL: URL) -> MigrationState {
         guard let data = try? Data(contentsOf: storeURL),
