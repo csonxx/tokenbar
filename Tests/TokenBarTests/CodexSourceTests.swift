@@ -297,6 +297,36 @@ final class AggregatorTests: XCTestCase {
         XCTAssertEqual(todayAgg.byTool[.codex]?.totalTokens, 180)
         XCTAssertEqual(todayAgg.byTool[.claudeCode]?.cacheHitRatio ?? 0, 0.3333, accuracy: 0.001)
     }
+
+    /// Billable is a cost-weighted estimate, not the raw fresh-token sum:
+    /// cache reads count (discounted, not dropped) and output is weighted up,
+    /// with the weights differing per provider. This is the fix for "计费
+    /// 看起来太少" - the old formula silently dropped cache reads, the single
+    /// biggest actually-billed component.
+    func testBillableIsCostWeightedPerProvider() {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        // Codex (OpenAI weights): cacheRead x0.1, cacheWrite x1.0, output x4.
+        let codex = TokenSample(tool: .codex, model: "gpt-5", timestamp: today.addingTimeInterval(100),
+                                inputTokens: 1000, outputTokens: 100, reasoningTokens: 0,
+                                cacheReadTokens: 5000, cacheWriteTokens: 200)
+        // 1000 + 5000*0.1 + 200*1.0 + 100*4 = 1000 + 500 + 200 + 400 = 2100
+        XCTAssertEqual(codex.billableTokens, 2100)
+        // The old drop-cache-reads formula would have given 1000+100+200 = 1300.
+        XCTAssertNotEqual(codex.billableTokens, 1300)
+
+        // Claude (Anthropic weights): cacheRead x0.1, cacheWrite x1.25, output x5.
+        let claude = TokenSample(tool: .claudeCode, model: "claude-sonnet-5", timestamp: today.addingTimeInterval(200),
+                                 inputTokens: 1000, outputTokens: 100, reasoningTokens: 0,
+                                 cacheReadTokens: 5000, cacheWriteTokens: 200)
+        // 1000 + 5000*0.1 + 200*1.25 + 100*5 = 1000 + 500 + 250 + 500 = 2250
+        XCTAssertEqual(claude.billableTokens, 2250)
+
+        // The daily rollup must sum the per-tool weighted values, not weight a
+        // blended field set (which would apply one tool's weights to another's).
+        let agg = Aggregator.aggregateWindow(samples: [codex, claude], window: .today, calendar: cal, now: today.addingTimeInterval(300))
+        XCTAssertEqual(agg.billableTokens, 2100 + 2250)
+    }
 }
 
 final class TokenFormatterTests: XCTestCase {

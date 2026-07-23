@@ -56,6 +56,57 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// Approximate public list-price ratios for each token category, expressed
+/// **relative to that model's own base (uncached) input-token price**. Used to
+/// turn the four raw token counts into a single cost-weighted "计费" number in
+/// units of "equivalent uncached-input tokens" - without needing absolute
+/// dollar prices, which drift constantly and, for the subscription/OAuth plans
+/// most of these tools use, aren't what you actually pay anyway. These are
+/// rough list-price shapes, not exact billing; edit here if a provider changes.
+struct TokenCostWeights {
+    /// Fresh uncached input is the baseline (always 1.0).
+    let cacheRead: Double
+    let cacheWrite: Double
+    let output: Double
+
+    // Anthropic: cache read ~0.1x input, cache write (5-min) ~1.25x, output ~5x.
+    static let anthropic = TokenCostWeights(cacheRead: 0.1, cacheWrite: 1.25, output: 5.0)
+    // OpenAI/Codex: cached input heavily discounted (~0.1x), no separate
+    // cache-write surcharge (~1.0x), output ~4x input.
+    static let openai = TokenCostWeights(cacheRead: 0.1, cacheWrite: 1.0, output: 4.0)
+    // Fallback for tools whose upstream provider we can't pin down.
+    static let generic = TokenCostWeights(cacheRead: 0.1, cacheWrite: 1.0, output: 4.0)
+
+    static func forTool(_ tool: ToolKind) -> TokenCostWeights {
+        switch tool {
+        case .claudeCode: return .anthropic
+        case .codex: return .openai
+        // OpenCode / CLIProxyAPI / TRAE fan out to mixed providers; fall back
+        // to per-model inference where the model name is available instead.
+        case .opencode, .cliProxyAPI, .trae: return .generic
+        }
+    }
+
+    static func forModel(_ name: String) -> TokenCostWeights {
+        let n = name.lowercased()
+        if n.contains("claude") || n.contains("anthropic") || n.contains("sonnet") || n.contains("opus") || n.contains("haiku") {
+            return .anthropic
+        }
+        if n.contains("gpt") || n.contains("codex") || n.contains("o1") || n.contains("o3") || n.contains("o4") {
+            return .openai
+        }
+        return .generic
+    }
+
+    func weightedBillable(uncachedInput: Int, output: Int, cacheRead: Int, cacheWrite: Int) -> Int {
+        let v = Double(uncachedInput)
+            + Double(cacheRead) * self.cacheRead
+            + Double(cacheWrite) * self.cacheWrite
+            + Double(output) * self.output
+        return Int(v.rounded())
+    }
+}
+
 /// Normalization contract every `TokenSource` must uphold before constructing
 /// a sample, so that everything downstream (Aggregator, UI) can use one
 /// tool-agnostic formula instead of branching per tool:
@@ -78,7 +129,15 @@ struct TokenSample: Identifiable, Codable, Hashable {
 
     var uncachedInputTokens: Int { inputTokens }
     var totalTokens: Int { inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens }
-    var billableTokens: Int { inputTokens + outputTokens + cacheWriteTokens }
+    /// Cost-weighted estimate (see `TokenCostWeights`): unlike the raw sum, it
+    /// does include cache reads - just discounted - since those really are
+    /// billed, and weights output up, so it tracks actual cost far better than
+    /// the old "drop cache reads entirely" formula.
+    var billableTokens: Int {
+        TokenCostWeights.forTool(tool).weightedBillable(
+            uncachedInput: inputTokens, output: outputTokens,
+            cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens)
+    }
 }
 
 struct DailyAggregate: Identifiable, Codable, Hashable {
@@ -93,7 +152,11 @@ struct DailyAggregate: Identifiable, Codable, Hashable {
     var byTool: [ToolKind: ToolAggregate] = [:]
     var byModel: [String: ModelAggregate] = [:]
 
-    var billableTokens: Int { uncachedInputTokens + outputTokens + cacheWriteTokens }
+    /// Summed from the per-tool weighted values rather than weighting the
+    /// blended top-level fields, because the cost weights differ per provider
+    /// (Anthropic vs OpenAI) - blending first would apply one tool's weights
+    /// to another tool's tokens.
+    var billableTokens: Int { byTool.values.reduce(0) { $0 + $1.billableTokens } }
     var cacheHitRatio: Double {
         let denom = inputTokensTotal
         guard denom > 0 else { return 0 }
@@ -114,7 +177,11 @@ struct ToolAggregate: Identifiable, Codable, Hashable {
     var messageCount: Int = 0
     var byModel: [String: ModelAggregate] = [:]
 
-    var billableTokens: Int { uncachedInputTokens + outputTokens + cacheWriteTokens }
+    var billableTokens: Int {
+        TokenCostWeights.forTool(tool).weightedBillable(
+            uncachedInput: uncachedInputTokens, output: outputTokens,
+            cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens)
+    }
     var inputTokensTotal: Int { uncachedInputTokens + cacheReadTokens }
     /// Cache hit ratio capped at [0, 1]. Some data sources (notably OpenCode)
     /// report cacheRead per-message rather than deduplicated, so the raw
@@ -137,7 +204,11 @@ struct ModelAggregate: Identifiable, Codable, Hashable {
     var cacheWriteTokens: Int = 0
     var messageCount: Int = 0
 
-    var billableTokens: Int { uncachedInputTokens + outputTokens + cacheWriteTokens }
+    var billableTokens: Int {
+        TokenCostWeights.forModel(name).weightedBillable(
+            uncachedInput: uncachedInputTokens, output: outputTokens,
+            cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens)
+    }
     var inputTokensTotal: Int { uncachedInputTokens + cacheReadTokens }
     var cacheHitRatio: Double {
         let denom = inputTokensTotal

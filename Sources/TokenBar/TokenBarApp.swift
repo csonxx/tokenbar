@@ -130,21 +130,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // here directly. Sync, no Task wrapper — it must take effect before
         // the menu's `nil`-clear happens 50 ms later.
         Self.log("openDashboardWindow invoked from menu")
-        let host = NSHostingController(rootView: DashboardView(store: store))
-        host.view.translatesAutoresizingMaskIntoConstraints = false
-        self.hosting = host
 
         let initialSize = NSSize(width: 880, height: 720)
 
+        // Reuse the existing window as-is. Its DashboardView already observes
+        // the store via @ObservedObject, so it stays live without rebuilding
+        // the hosting controller. Crucially we do NOT reassign
+        // `contentViewController` here: doing so made AppKit re-derive the
+        // window size from the controller's fitting size and collapse the
+        // window to just its title bar on every reopen.
         if let existing = dashboardWindow {
             Self.log("reusing existing window \(existing.title)")
-            // Assigning a brand-new `contentViewController` on an existing
-            // window can make AppKit resize it to that controller's initial
-            // fitting size before SwiftUI's own layout has settled - which is
-            // how this collapsed to just its title bar on a second open, even
-            // with the size safeguard already in place for the first-open
-            // path below. Re-check and correct it here too.
-            existing.contentViewController = host
             if existing.frame.width < existing.contentMinSize.width || existing.frame.height < existing.contentMinSize.height {
                 existing.setContentSize(initialSize)
                 existing.center()
@@ -153,6 +149,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+
+        let host = NSHostingController(rootView: DashboardView(store: store))
+        // Stop the hosting controller from driving the window's size off the
+        // SwiftUI content's fitting size. The dashboard's root is a
+        // ScrollView, whose minimal fitting height is ~0, so the default
+        // `.preferredContentSize`/`.minSize` behaviour shrank the window to
+        // its title bar. With no sizing options the window keeps whatever
+        // size we set explicitly.
+        host.sizingOptions = []
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        self.hosting = host
 
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         let frame = NSRect(origin: .zero, size: initialSize)
