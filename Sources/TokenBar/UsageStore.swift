@@ -323,6 +323,37 @@ final class SampleStore: @unchecked Sendable {
         _hasLoadedFromDisk = true
         cacheLock.unlock()
     }
+
+    /// Wipes the store but keeps samples for `preservingTools`. Used by the
+    /// cache reset so a full rescan of the re-derivable file/DB sources never
+    /// destroys data from an ephemeral source (CLIProxyAPI's pop-on-read
+    /// queue), for which this store holds the only surviving copy.
+    func clear(preservingTools: Set<ToolKind>) {
+        guard !preservingTools.isEmpty else { clear(); return }
+        ensureLoadedFromDisk()
+        cacheLock.lock()
+        let kept = _cached.filter { preservingTools.contains($0.tool) }
+        cacheLock.unlock()
+
+        queue.sync {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appendingPathComponent("samples.jsonl")
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            var data = Data()
+            for s in kept {
+                if let d = try? encoder.encode(s) {
+                    data.append(d)
+                    data.append(0x0A)
+                }
+            }
+            try? data.write(to: fileURL)
+        }
+        cacheLock.lock()
+        _cached = kept
+        _hasLoadedFromDisk = true
+        cacheLock.unlock()
+    }
 }
 @MainActor
 final class UsageStore: ObservableObject {
@@ -615,7 +646,12 @@ final class UsageStore: ObservableObject {
     func resetCaches() async {
         await progress.clear()
         await OpenCodeSource.sharedCursor.reset()
-        sampleStore.clear()
+        // Preserve samples from ephemeral sources (CLIProxyAPI) whose upstream
+        // data can't be re-fetched - a full rescan only re-derives the
+        // file/DB-backed sources. Wiping everything here previously destroyed
+        // all accumulated CLIProxyAPI history on a schema-migration rescan.
+        let preserve = Set(ToolKind.allCases.filter { $0.sourceIsEphemeral })
+        sampleStore.clear(preservingTools: preserve)
         dayBuckets = [:]
         hourBuckets = [:]
         lastSampleByTool = [:]

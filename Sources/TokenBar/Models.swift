@@ -11,6 +11,20 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// True when this source's upstream data is consume-once / non-persistent,
+    /// so TokenBar's own sample store holds the *only* copy. CLIProxyAPI's
+    /// `/v0/management/usage-queue` is a pop-on-read, in-memory queue with a
+    /// short retention window, so once TokenBar has drained a record it exists
+    /// nowhere else. File/DB-backed sources (Codex/Claude/OpenCode) can always
+    /// be re-scanned from their on-disk source, so they're safe to wipe on a
+    /// cache reset; ephemeral ones must be preserved across resets.
+    var sourceIsEphemeral: Bool {
+        switch self {
+        case .cliProxyAPI: return true
+        case .codex, .claudeCode, .opencode, .trae: return false
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .codex: return "terminal"

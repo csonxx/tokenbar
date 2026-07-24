@@ -35,6 +35,31 @@ final class SampleStoreTests: XCTestCase {
         XCTAssertTrue(all.contains(sample2))
     }
 
+    /// A cache reset (schema migration or manual) full-rescans the
+    /// re-derivable file/DB sources, but must NOT destroy data from an
+    /// ephemeral source (CLIProxyAPI) whose only copy lives here.
+    func testClearPreservingKeepsEphemeralSourceSamples() {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tokenbar-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+
+        let codex = TokenSample(tool: .codex, model: "gpt-5", timestamp: Date(timeIntervalSince1970: 0),
+                                inputTokens: 100, outputTokens: 50, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0)
+        let proxy = TokenSample(tool: .cliProxyAPI, model: "acct/gpt-5", timestamp: Date(timeIntervalSince1970: 100),
+                                inputTokens: 200, outputTokens: 80, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0)
+        let store = SampleStore(directory: tmp)
+        store.append([codex, proxy])
+
+        store.clear(preservingTools: [.cliProxyAPI])
+
+        let kept = store.loadAll()
+        XCTAssertEqual(kept.count, 1, "only the ephemeral-source sample should survive the reset")
+        XCTAssertEqual(kept.first?.tool, .cliProxyAPI)
+
+        // And it must survive a fresh reload from disk, not just the cache.
+        let reopened = SampleStore(directory: tmp)
+        XCTAssertEqual(reopened.loadAll().map(\.tool), [.cliProxyAPI])
+    }
+
     func testLoadAllBeforeAppendStillSeesLaterAppends() {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tokenbar-test-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
