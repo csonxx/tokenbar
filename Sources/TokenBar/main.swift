@@ -26,7 +26,8 @@ if arguments.contains("--cli") {
         CodexSource(home: home, progress: progress),
         ClaudeCodeSource(home: home, progress: progress),
         OpenCodeSource(home: home, progress: progress),
-        TraeSource(home: home, progress: progress)
+        TraeSource(home: home, progress: progress),
+        WorkBuddySource(home: home, progress: progress)
     ]
     let semaphore = DispatchSemaphore(value: 0)
     Task.detached {

@@ -214,6 +214,7 @@ enum Aggregator {
             case .opencode: return "opencode"
             case .trae: return "trae"
             case .cliProxyAPI: return "cliproxyapi"
+            case .workbuddy: return "workbuddy"
             }
         }
         return trimmed
@@ -398,6 +399,7 @@ final class UsageStore: ObservableObject {
             ClaudeCodeSource(home: effectiveHome, progress: progress),
             OpenCodeSource(home: effectiveHome, progress: progress),
             TraeSource(home: effectiveHome, progress: progress),
+            WorkBuddySource(home: effectiveHome, progress: progress),
             CLIProxyAPISource()
         ]
     }

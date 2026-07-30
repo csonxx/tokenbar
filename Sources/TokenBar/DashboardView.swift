@@ -759,7 +759,8 @@ struct TrendChart: View {
         ToolKind.claudeCode.rawValue: ToolKind.claudeCode.tintColor,
         ToolKind.opencode.rawValue: ToolKind.opencode.tintColor,
         ToolKind.trae.rawValue: ToolKind.trae.tintColor,
-        ToolKind.cliProxyAPI.rawValue: ToolKind.cliProxyAPI.tintColor
+        ToolKind.cliProxyAPI.rawValue: ToolKind.cliProxyAPI.tintColor,
+        ToolKind.workbuddy.rawValue: ToolKind.workbuddy.tintColor
     ]
 
     // Flattened once, outside the chart's result builder, so Chart's builder

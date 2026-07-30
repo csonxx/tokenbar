@@ -8,6 +8,7 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
     case opencode = "OpenCode"
     case trae = "TRAE"
     case cliProxyAPI = "CLIProxyAPI"
+    case workbuddy = "WorkBuddy"
 
     var id: String { rawValue }
 
@@ -21,7 +22,7 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
     var sourceIsEphemeral: Bool {
         switch self {
         case .cliProxyAPI: return true
-        case .codex, .claudeCode, .opencode, .trae: return false
+        case .codex, .claudeCode, .opencode, .trae, .workbuddy: return false
         }
     }
 
@@ -32,6 +33,7 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
         case .opencode: return "chevron.left.forwardslash.chevron.right"
         case .trae: return "hammer.fill"
         case .cliProxyAPI: return "network"
+        case .workbuddy: return "briefcase.fill"
         }
     }
 
@@ -44,6 +46,7 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
         case .opencode: return .purple
         case .trae: return .green
         case .cliProxyAPI: return .teal
+        case .workbuddy: return .pink
         }
     }
 
@@ -54,6 +57,7 @@ enum ToolKind: String, CaseIterable, Codable, Identifiable {
         case .opencode: return "tool-opencode"
         case .trae: return "tool-trae"
         case .cliProxyAPI: return nil
+        case .workbuddy: return "tool-workbuddy"
         }
     }
 
@@ -97,7 +101,7 @@ struct TokenCostWeights {
         case .codex: return .openai
         // OpenCode / CLIProxyAPI / TRAE fan out to mixed providers; fall back
         // to per-model inference where the model name is available instead.
-        case .opencode, .cliProxyAPI, .trae: return .generic
+        case .opencode, .cliProxyAPI, .trae, .workbuddy: return .generic
         }
     }
 
