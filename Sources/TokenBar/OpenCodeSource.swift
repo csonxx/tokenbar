@@ -19,10 +19,10 @@ final class OpenCodeSource: TokenSource {
 
     static let sharedCursor = OpenCodeMessageCursor()
 
-    init(home: URL, progress: SourceProgress) {
+    init(home: URL, progress: SourceProgress, cursor: OpenCodeMessageCursor? = nil) {
         self.home = home
         self.progress = progress
-        self.messageCursor = Self.sharedCursor
+        self.messageCursor = cursor ?? Self.sharedCursor
     }
 
     func collect() async throws -> SourceResult {
@@ -31,19 +31,42 @@ final class OpenCodeSource: TokenSource {
             return SourceResult.empty(note: "OpenCode 数据库 (~/.local/share/opencode/opencode.db) 不存在")
         }
 
-        let lastSeenID = await messageCursor.loadLastMessageID()
-        let firstScan = (lastSeenID == nil)
-
         guard let db = openDatabase(dbURL) else {
             return SourceResult.empty(note: "无法打开 OpenCode 数据库")
         }
         defer { sqlite3_close(db) }
 
+        // Cursor is keyed on `time_created` (a unix-ms timestamp), NOT the
+        // message id. OpenCode's message ids are not lexicographically
+        // monotonic over time - their prefix wrapped around between late July
+        // and August (ids went from "msg_f92..." to "msg_042..."), so the old
+        // "skip id <= lastSeenId" logic silently stopped ingesting anything
+        // new for over a month once the wrap happened. Timestamps don't wrap.
+        let (pos, legacyId) = await messageCursor.load()
+        var seedTime: Int64 = -1
+        var seedId = ""
+        var firstScan = false
+        if let pos {
+            seedTime = pos.time
+            seedId = pos.id
+        } else if let legacyId, let t = timeCreated(db, forID: legacyId) {
+            // Migrate a pre-time-based cursor: resume from the timestamp of
+            // the last id it recorded, so already-ingested rows aren't
+            // recounted and the backlog since then is picked up.
+            seedTime = t
+            seedId = legacyId
+        } else {
+            firstScan = true
+        }
+
+        // Tie-break on id at the exact same millisecond so we neither skip nor
+        // repeat rows that share a `time_created`.
         let sql = """
         SELECT id, time_created, data
         FROM message
         WHERE json_extract(data, '$.role') = 'assistant'
-        ORDER BY id ASC
+          AND (time_created > ?1 OR (time_created = ?1 AND id > ?2))
+        ORDER BY time_created ASC, id ASC
         """
 
         var stmt: OpaquePointer?
@@ -52,37 +75,52 @@ final class OpenCodeSource: TokenSource {
                                 note: "OpenCode 查询失败: \(lastError(db))")
         }
         defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, seedTime)
+        sqlite3_bind_text(stmt, 2, seedId, -1, Self.sqliteTransient)
 
         var samples: [TokenSample] = []
-        var newLastID = lastSeenID
+        var newTime: Int64? = nil
+        var newId: String? = nil
 
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = String(cString: sqlite3_column_text(stmt, 0))
-            if !firstScan, let lastSeenID, id <= lastSeenID { continue }
-
             let timeMs = sqlite3_column_int64(stmt, 1)
             let dataCStr = sqlite3_column_text(stmt, 2)
             let data = dataCStr.flatMap { String(cString: $0) } ?? ""
+            // Advance the cursor past every row we step, even ones that
+            // don't parse into a sample (zero-token / malformed), so they
+            // aren't rescanned forever.
+            newTime = timeMs
+            newId = id
 
             guard let sample = parseMessage(timeMs: timeMs, data: data) else { continue }
             samples.append(sample)
-            newLastID = id
         }
 
-        // Persist cursor.
-        if let newLastID {
-            await messageCursor.saveLastMessageID(newLastID)
+        if let newTime, let newId {
+            await messageCursor.save(time: newTime, id: newId)
         }
 
         let note: String?
-        if !FileManager.default.fileExists(atPath: dbURL.path) {
-            note = "OpenCode 数据库不存在"
-        } else if samples.isEmpty && !firstScan {
+        if samples.isEmpty && !firstScan {
             note = "OpenCode 没有新增消息"
         } else {
             note = nil
         }
         return SourceResult(samples: samples, fileCount: 1, note: note)
+    }
+
+    private static let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    /// Looks up a single message's `time_created`, used once to migrate a
+    /// legacy id-only cursor onto the timestamp-based cursor.
+    private func timeCreated(_ db: OpaquePointer?, forID id: String) -> Int64? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT time_created FROM message WHERE id = ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.sqliteTransient)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
     }
 
     private func parseMessage(timeMs: Int64, data: String) -> TokenSample? {
@@ -129,14 +167,28 @@ final class OpenCodeSource: TokenSource {
     }
 }
 
-/// Persists the highest-seen OpenCode message id as a simple JSON file.
-/// Keyed by a single global cursor (we only ever scan forward; the message
-/// table is append-only in practice).
+/// Persists how far the OpenCode scan has advanced, as a `time_created`
+/// timestamp plus the id at that timestamp for tie-breaking. We only ever
+/// scan forward; the message table is append-only in practice.
+///
+/// Earlier versions stored only the last message id and compared ids
+/// lexicographically - that broke permanently once OpenCode's id prefix
+/// wrapped, since new ids sorted *before* the stored one. A legacy id-only
+/// cursor is migrated to the timestamp form on first load (see `collect`).
 actor OpenCodeMessageCursor {
+    struct Position: Sendable { var time: Int64; var id: String }
+
     private var loaded = false
-    private var lastMessageID: String?
+    private var position: Position?
+    private var legacyId: String?
+    private let overrideURL: URL?
+
+    init(storeURL: URL? = nil) {
+        self.overrideURL = storeURL
+    }
 
     private var url: URL {
+        if let overrideURL { return overrideURL }
         let support = (try? FileManager.default.url(for: .applicationSupportDirectory,
                                                     in: .userDomainMask,
                                                     appropriateFor: nil,
@@ -145,15 +197,18 @@ actor OpenCodeMessageCursor {
         return support.appendingPathComponent("TokenBar/opencode_message_cursor.json")
     }
 
-    func loadLastMessageID() -> String? {
+    /// Returns the current timestamp cursor, and - only when no timestamp
+    /// cursor has been written yet - any legacy id-only value to migrate from.
+    func load() -> (position: Position?, legacyId: String?) {
         ensureLoaded()
-        return lastMessageID
+        return (position, legacyId)
     }
 
-    func saveLastMessageID(_ id: String) {
+    func save(time: Int64, id: String) {
         ensureLoaded()
-        lastMessageID = id
-        let payload = ["lastMessageID": id]
+        position = Position(time: time, id: id)
+        legacyId = nil
+        let payload: [String: Any] = ["lastTime": time, "lastId": id]
         if let data = try? JSONSerialization.data(withJSONObject: payload) {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
@@ -162,7 +217,8 @@ actor OpenCodeMessageCursor {
     }
 
     func reset() {
-        lastMessageID = nil
+        position = nil
+        legacyId = nil
         loaded = false
         try? FileManager.default.removeItem(at: url)
     }
@@ -170,10 +226,15 @@ actor OpenCodeMessageCursor {
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        if let data = try? Data(contentsOf: url),
-           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let v = payload["lastMessageID"] as? String {
-            lastMessageID = v
+        guard let data = try? Data(contentsOf: url),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        if let t = (payload["lastTime"] as? NSNumber)?.int64Value,
+           let id = payload["lastId"] as? String {
+            position = Position(time: t, id: id)
+        } else if let old = payload["lastMessageID"] as? String {
+            legacyId = old
         }
     }
 }
