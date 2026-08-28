@@ -337,7 +337,27 @@ final class AggregatorTests: XCTestCase {
         XCTAssertEqual(todayAgg.cacheReadTokens, 130)
         XCTAssertEqual(history.count, 1)
         XCTAssertEqual(todayAgg.byTool[.codex]?.totalTokens, 180)
-        XCTAssertEqual(todayAgg.byTool[.claudeCode]?.cacheHitRatio ?? 0, 0.3333, accuracy: 0.001)
+        // hit rate = cacheRead / (uncachedInput + cacheRead + cacheWrite)
+        // = 100 / (200 + 100 + 20) = 0.3125 (cache writes count as misses).
+        XCTAssertEqual(todayAgg.byTool[.claudeCode]?.cacheHitRatio ?? 0, 0.3125, accuracy: 0.001)
+    }
+
+    /// Cache hit rate counts cache writes as misses (they're first-time,
+    /// premium-billed input), so a turn that reads a lot from cache but also
+    /// creates a lot of cache is NOT ~100%. Regression for Claude Code pinning
+    /// at 100% every window when writes were excluded from the denominator.
+    func testCacheHitRateCountsCacheWritesAsMisses() {
+        let cal = Calendar.current
+        let now = Date()
+        // fresh input 2, cacheRead 96, cacheWrite 2 -> 96/(2+96+2) = 0.96.
+        let s = TokenSample(tool: .claudeCode, model: "claude-sonnet-5", timestamp: now,
+                            inputTokens: 2, outputTokens: 10, reasoningTokens: 0,
+                            cacheReadTokens: 96, cacheWriteTokens: 2)
+        let agg = Aggregator.aggregateWindow(samples: [s], window: .today, calendar: cal, now: now)
+        XCTAssertEqual(agg.cacheHitRatio, 0.96, accuracy: 0.0001)
+        // The old write-excluding formula would have given 96/(2+96) = 0.9796,
+        // rounding to ~98-100% and hiding the cache-creation cost.
+        XCTAssertNotEqual(agg.cacheHitRatio, 96.0 / 98.0, accuracy: 0.0001)
     }
 
     /// Billable is a cost-weighted estimate, not the raw fresh-token sum:

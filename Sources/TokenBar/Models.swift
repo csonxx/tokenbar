@@ -175,12 +175,25 @@ struct DailyAggregate: Identifiable, Codable, Hashable {
     /// (Anthropic vs OpenAI) - blending first would apply one tool's weights
     /// to another tool's tokens.
     var billableTokens: Int { byTool.values.reduce(0) { $0 + $1.billableTokens } }
-    var cacheHitRatio: Double {
-        let denom = inputTokensTotal
-        guard denom > 0 else { return 0 }
-        return min(1.0, Double(cacheReadTokens) / Double(denom))
-    }
+    var cacheHitRatio: Double { Self.hitRatio(read: cacheReadTokens, uncachedInput: uncachedInputTokens, write: cacheWriteTokens) }
     var inputTokensTotal: Int { uncachedInputTokens + cacheReadTokens }
+}
+
+/// Fraction of input tokens that were served from cache. The denominator is
+/// ALL input the model had to account for - fresh uncached input, cache reads,
+/// AND cache writes (cache creation is a first-time miss that also gets stored,
+/// billed at a premium, so it counts against the hit rate, not for it).
+/// Excluding cache writes pinned Claude Code's rate at ~100% every window
+/// (it caches so aggressively that fresh input is a couple of tokens a turn),
+/// which made the number useless; including them makes it move (~96% typical).
+/// Clamped to [0, 1] because some sources (notably OpenCode) report cacheRead
+/// per-message rather than deduplicated, so the raw ratio can exceed 100%.
+extension DailyAggregate {
+    static func hitRatio(read: Int, uncachedInput: Int, write: Int) -> Double {
+        let denom = uncachedInput + read + write
+        guard denom > 0 else { return 0 }
+        return min(1.0, Double(read) / Double(denom))
+    }
 }
 
 struct ToolAggregate: Identifiable, Codable, Hashable {
@@ -201,14 +214,7 @@ struct ToolAggregate: Identifiable, Codable, Hashable {
             cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens)
     }
     var inputTokensTotal: Int { uncachedInputTokens + cacheReadTokens }
-    /// Cache hit ratio capped at [0, 1]. Some data sources (notably OpenCode)
-    /// report cacheRead per-message rather than deduplicated, so the raw
-    /// ratio can exceed 100%. We clamp and surface the raw counts separately.
-    var cacheHitRatio: Double {
-        let denom = inputTokensTotal
-        guard denom > 0 else { return 0 }
-        return min(1.0, Double(cacheReadTokens) / Double(denom))
-    }
+    var cacheHitRatio: Double { DailyAggregate.hitRatio(read: cacheReadTokens, uncachedInput: uncachedInputTokens, write: cacheWriteTokens) }
 }
 
 struct ModelAggregate: Identifiable, Codable, Hashable {
@@ -228,11 +234,7 @@ struct ModelAggregate: Identifiable, Codable, Hashable {
             cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens)
     }
     var inputTokensTotal: Int { uncachedInputTokens + cacheReadTokens }
-    var cacheHitRatio: Double {
-        let denom = inputTokensTotal
-        guard denom > 0 else { return 0 }
-        return min(1.0, Double(cacheReadTokens) / Double(denom))
-    }
+    var cacheHitRatio: Double { DailyAggregate.hitRatio(read: cacheReadTokens, uncachedInput: uncachedInputTokens, write: cacheWriteTokens) }
 }
 
 /// Everything the UI needs, pre-aggregated exactly once per `refresh()` cycle
