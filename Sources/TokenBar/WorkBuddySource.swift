@@ -73,13 +73,19 @@ final class WorkBuddySource: TokenSource {
                     startOffset = prior.offset
                 }
 
+                // Skip files with nothing new before any reading, so an idle
+                // refresh never re-reads processed history.
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                if prior?.identity == identity, startOffset >= fileSize { continue }
+
                 // Parallel tool calls in one API turn share a messageId and
-                // repeat the same usage; count each unique id once. Recover
-                // the last-seen id from the already-processed prefix so a
-                // resume across that boundary doesn't recount it.
-                var lastMessageID: String? = startOffset > 0
-                    ? loadLastMessageID(url: url, upTo: startOffset)
-                    : nil
+                // repeat the same usage; count each unique id once. The last id
+                // is carried in the cursor metadata (O(1) resume); only fall
+                // back to a one-time prefix scan for a legacy cursor without it.
+                var lastMessageID: String? = prior?.metadata
+                if lastMessageID == nil, startOffset > 0 {
+                    lastMessageID = loadLastMessageID(url: url, upTo: startOffset)
+                }
 
                 guard let stream = ChunkedLineReader.stream(url: url, startingOffset: startOffset, perLine: { line in
                     guard let rec = try? JSONDecoder().decode(WBLine.self, from: Data(line.utf8)),
@@ -111,7 +117,7 @@ final class WorkBuddySource: TokenSource {
                 }) else { continue }
 
                 guard stream.hadNewBytes else { continue }
-                await progress.update(key, offset: stream.newOffset, identity: identity)
+                await progress.update(key, offset: stream.newOffset, identity: identity, metadata: lastMessageID)
             }
         }
         await progress.flush()

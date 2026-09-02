@@ -61,11 +61,23 @@ final class ClaudeCodeSource: TokenSource {
                     startOffset = prior.offset
                 }
 
-                // Repeated content-block lines for the same API call share
-                // the same message id and usage; only count each message once.
-                var lastMessageID: String? = startOffset > 0
-                    ? loadLastMessageID(url: url, upTo: startOffset)
-                    : nil
+                // Skip files with nothing new BEFORE any reading. Re-deriving
+                // the last message id by rescanning the processed prefix on
+                // every 30s refresh meant re-reading the entire ~2GB Claude
+                // history each cycle (pegging CPU and thrashing memory) even
+                // when no session had changed.
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                if prior?.identity == identity, startOffset >= fileSize { continue }
+
+                // Repeated content-block lines for the same API call share the
+                // same message id and usage; only count each message once. The
+                // last id is carried in the cursor metadata (O(1) resume);
+                // only fall back to a one-time prefix scan for a legacy cursor
+                // that predates that metadata.
+                var lastMessageID: String? = prior?.metadata
+                if lastMessageID == nil, startOffset > 0 {
+                    lastMessageID = loadLastMessageID(url: url, upTo: startOffset)
+                }
 
                 guard let stream = ChunkedLineReader.stream(url: url, startingOffset: startOffset, perLine: { line in
                     guard let rec = try? JSONDecoder().decode(ClaudeLine.self, from: Data(line.utf8)) else { return }
@@ -94,7 +106,7 @@ final class ClaudeCodeSource: TokenSource {
                 }) else { continue }
 
                 guard stream.hadNewBytes else { continue }
-                await progress.update(key, offset: stream.newOffset, identity: identity)
+                await progress.update(key, offset: stream.newOffset, identity: identity, metadata: lastMessageID)
             }
         }
         await progress.flush()
